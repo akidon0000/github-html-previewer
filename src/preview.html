@@ -21,6 +21,7 @@
         color: #c9d1d9;
         font-size: 12px;
         border-bottom: 1px solid #30363d;
+        flex: 0 0 auto;
       }
       #src {
         flex: 1;
@@ -30,11 +31,7 @@
         opacity: 0.85;
       }
       #bar button,
-      #bar label {
-        font-size: 12px;
-        color: #c9d1d9;
-        cursor: pointer;
-      }
+      #bar label { font-size: 12px; color: #c9d1d9; cursor: pointer; }
       #bar button {
         background: #21262d;
         border: 1px solid #30363d;
@@ -43,7 +40,8 @@
       }
       #bar button:hover { background: #30363d; }
       #bar label { display: inline-flex; align-items: center; gap: 4px; }
-      #frame { flex: 1; width: 100%; border: 0; background: #fff; }
+      /* The sandboxed renderer fills the rest and scrolls internally. */
+      #sandbox { flex: 1 1 auto; width: 100%; border: 0; background: #fff; }
     </style>
   </head>
   <body>
@@ -52,10 +50,8 @@
       <label><input type="checkbox" id="toggle-scripts" checked /> スクリプト実行</label>
       <button id="reload" type="button">↻ 再読み込み</button>
     </header>
-    <iframe
-      id="frame"
-      sandbox="allow-scripts allow-forms allow-popups allow-modals"
-    ></iframe>
+    <!-- Sandboxed page (permissive CSP) where the HTML actually renders. -->
+    <iframe id="sandbox" src="preview-sandbox.html"></iframe>
     <script src="preview.js"></script>
   </body>
 </html>

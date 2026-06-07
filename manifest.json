@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GitHub HTML Previewer",
-  "version": "0.2.0",
+  "version": "0.5.0",
   "description": "Render HTML files hosted on GitHub locally, instead of reading the raw source.",
   "permissions": ["storage", "tabs"],
   "host_permissions": [
@@ -23,10 +23,17 @@
       "run_at": "document_idle"
     }
   ],
+  "sandbox": {
+    "pages": ["src/preview-sandbox.html"]
+  },
   "web_accessible_resources": [
     {
-      "resources": ["src/preview-frame.html"],
+      "resources": ["src/preview.html"],
       "matches": ["https://github.com/*"]
     }
-  ]
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'",
+    "sandbox": "sandbox allow-scripts allow-forms allow-popups allow-modals; script-src 'self' 'unsafe-inline' 'unsafe-eval' https: http:; style-src 'self' 'unsafe-inline' https: http:; img-src * data: blob:; font-src * data: blob:; connect-src * data: blob:; frame-src * data: blob:; child-src * data: blob:; media-src * data: blob:; default-src 'self' https: http: data: blob:"
+  }
 }

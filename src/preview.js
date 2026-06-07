@@ -1,50 +1,50 @@
-// Reads the stashed HTML from session storage and renders it inside a sandboxed
-// iframe. A <base> tag is injected so relative CSS/JS/images resolve against the
-// file's directory on raw.githubusercontent.com.
+// Controller for the preview tab. Reads the stashed HTML from session storage
+// (an extension-page privilege the sandboxed renderer doesn't have) and hands it
+// to the sandboxed iframe via postMessage. The sandbox runs under a permissive
+// CSP, so the previewed page's scripts (e.g. Mermaid) actually execute.
 
-const frame = document.getElementById("frame");
+const sandbox = document.getElementById("sandbox");
 const srcEl = document.getElementById("src");
 const reloadBtn = document.getElementById("reload");
 const toggleScripts = document.getElementById("toggle-scripts");
 
-const SANDBOX_BASE = ["allow-forms", "allow-popups", "allow-modals"];
+let current = null; // { html, rawBase, sourceUrl }
+let sandboxReady = false;
 
-let current = null;
-
-function injectBase(html, base) {
-  if (!base) return html;
-  const tag = `<base href="${base}">`;
-  if (/<head[^>]*>/i.test(html)) {
-    return html.replace(/<head[^>]*>/i, (m) => m + tag);
-  }
-  if (/<html[^>]*>/i.test(html)) {
-    return html.replace(/<html[^>]*>/i, (m) => m + tag);
-  }
-  return tag + html;
+function post() {
+  if (!current || !sandboxReady) return;
+  sandbox.contentWindow.postMessage(
+    {
+      type: "ghhp-render",
+      html: current.html,
+      rawBase: current.rawBase,
+      allowScripts: toggleScripts.checked
+    },
+    "*"
+  );
 }
 
-function render() {
-  if (!current) return;
-  const flags = [...SANDBOX_BASE];
-  if (toggleScripts.checked) flags.push("allow-scripts");
-  frame.setAttribute("sandbox", flags.join(" "));
-  // Reassign srcdoc to force a fresh load (e.g. after toggling scripts).
-  frame.srcdoc = injectBase(current.html, current.rawBase);
-}
+// The sandboxed page has an opaque origin, so we identify it by window, not origin.
+window.addEventListener("message", (e) => {
+  if (e.source === sandbox.contentWindow && e.data?.type === "ghhp-sandbox-ready") {
+    sandboxReady = true;
+    post();
+  }
+});
 
-async function load() {
+reloadBtn.addEventListener("click", post);
+toggleScripts.addEventListener("change", post);
+
+(async () => {
   const { preview } = await chrome.storage.session.get("preview");
   if (!preview) {
-    srcEl.textContent = "プレビューするデータがありません。GitHub の HTML ファイルで「Preview HTML」を押すか、ポップアップから貼り付けてください。";
+    srcEl.textContent =
+      "プレビューするデータがありません。GitHub の HTML ファイルで「Preview」を押すか、ポップアップから貼り付けてください。";
     return;
   }
   current = preview;
   srcEl.textContent = preview.sourceUrl || "(pasted HTML)";
   const name = (preview.sourceUrl || "").split("/").pop() || "HTML";
   document.title = `Preview – ${name}`;
-  render();
-}
-
-reloadBtn.addEventListener("click", render);
-toggleScripts.addEventListener("change", render);
-load();
+  post(); // in case the sandbox was already ready
+})();
