@@ -22,15 +22,13 @@
   let inlineActive = false;
   let hiddenRegion = null;
   let frameEl = null;
-  let prevActive = null; // { el, value } native segment we deselected for inline
 
   // ---- helpers ---------------------------------------------------------------
 
   function htmlBlobInfo() {
-    // ["", OWNER, REPO, ("blob"|"blame"), BRANCH, ...path]
-    // Match the Blame view too, so our buttons stay visible there.
+    // ["", OWNER, REPO, "blob", BRANCH, ...path]
     const parts = location.pathname.split("/");
-    if ((parts[3] !== "blob" && parts[3] !== "blame") || parts.length < 6) return null;
+    if (parts[3] !== "blob" || parts.length < 6) return null;
     const file = parts[parts.length - 1];
     if (!/\.html?$/i.test(file)) return null;
 
@@ -89,49 +87,27 @@
     return null;
   }
 
-  // The link in the toggle that points to a given pathname (used to anchor on the
-  // Code/Blame control reliably on both the blob and blame views).
-  function anchorToPath(pathname) {
-    for (const a of document.querySelectorAll("a[href]")) {
-      try {
-        if (new URL(a.getAttribute("href"), location.origin).pathname === pathname) return a;
-      } catch (_e) {
-        /* ignore malformed href */
-      }
-    }
-    return null;
-  }
-
   function findToggle() {
-    // The Code/Blame control always links to the *other* view of this file
-    // (Blame link on a blob page, Code link on a blame page). That link is a
-    // unique, reliable anchor — unlike breadcrumb links which point elsewhere.
-    const isBlame = location.pathname.split("/")[3] === "blame";
-    const otherPath = isBlame
-      ? location.pathname.replace("/blame/", "/blob/")
-      : location.pathname.replace("/blob/", "/blame/");
-
-    let anchor = anchorToPath(otherPath);
-    if (!anchor) {
+    let blame = document.querySelector('a[href*="/blame/"]');
+    if (!blame) {
       const candidates = document.querySelectorAll(
         '[class*="SegmentedControl"] a, [class*="SegmentedControl"] button, nav a, nav button'
       );
       for (const el of candidates) {
-        const t = el.textContent.trim();
-        if (t === "Blame" || t === "Code") {
-          anchor = el;
+        if (el.textContent.trim() === "Blame") {
+          blame = el;
           break;
         }
       }
     }
-    if (!anchor) return null;
+    if (!blame) return null;
     const container =
-      anchor.closest("ul") ||
-      anchor.closest('[class*="SegmentedControl"]') ||
-      (anchor.parentElement && anchor.parentElement.parentElement) ||
-      anchor.parentElement;
+      blame.closest("ul") ||
+      blame.closest('[class*="SegmentedControl"]') ||
+      (blame.parentElement && blame.parentElement.parentElement) ||
+      blame.parentElement;
     if (!container) return null;
-    let item = anchor;
+    let item = blame;
     while (item.parentElement && item.parentElement !== container) item = item.parentElement;
     return { container, item };
   }
@@ -157,33 +133,6 @@
     const btn = clickableOf(node);
     if (active) btn.setAttribute("aria-current", "true");
     else btn.removeAttribute("aria-current");
-  }
-
-  // Move the segmented-control selection onto our Preview segment: deselect the
-  // currently-active native segment (Code/Blame) and remember it so we can
-  // restore it when the preview is closed.
-  function selectPreviewSegment(btn) {
-    prevActive = null;
-    const container = btn.parentElement;
-    if (container) {
-      for (const seg of container.children) {
-        if (seg === btn) continue;
-        const c = clickableOf(seg);
-        const cur = c.getAttribute("aria-current");
-        if (cur) {
-          prevActive = { el: c, value: cur };
-          c.removeAttribute("aria-current");
-        }
-      }
-    }
-    markActive(btn, true);
-  }
-
-  function restoreSelection() {
-    if (prevActive) {
-      prevActive.el.setAttribute("aria-current", prevActive.value);
-      prevActive = null;
-    }
   }
 
   // ---- preview actions -------------------------------------------------------
@@ -236,16 +185,12 @@
       frameEl = document.createElement("iframe");
       frameEl.id = FRAME_ID;
       frameEl.src = chrome.runtime.getURL("src/preview-sandbox.html");
-      // Height is auto-fit to the content (see the ghhp-height handler), so the
-      // inner scrollbar is redundant — the GitHub page scrolls the whole preview.
-      frameEl.setAttribute("scrolling", "no");
       Object.assign(frameEl.style, {
         width: "100%",
         height: "80vh",
         border: "1px solid #30363d",
         borderRadius: "6px",
-        background: "#fff",
-        overflow: "hidden"
+        background: "#fff"
       });
       frameEl.addEventListener("load", () => {
         frameEl.contentWindow.postMessage(
@@ -257,7 +202,7 @@
       region.style.display = "none";
       region.parentElement.insertBefore(frameEl, region.nextSibling);
       inlineActive = true;
-      selectPreviewSegment(btn);
+      markActive(btn, true);
     } catch (e) {
       setSegmentLabel(btn, "Preview(inline)");
       alert("プレビューに失敗しました: " + String(e));
@@ -271,25 +216,12 @@
     hiddenRegion = null;
     inlineActive = false;
     markActive(btn || document.getElementById(INLINE_ID), false);
-    restoreSelection();
   }
 
   function toggleInline(info, btn) {
     if (inlineActive) deactivateInline(btn);
     else activateInline(info, btn);
   }
-
-  // The inline sandbox reports its content height; size the iframe to fit so the
-  // GitHub page scrolls the whole preview naturally (no inner scrollbar). Updates
-  // as images / Mermaid change the layout.
-  window.addEventListener("message", (e) => {
-    if (!frameEl || e.source !== frameEl.contentWindow) return;
-    const d = e.data;
-    if (d?.type !== "ghhp-height" || typeof d.height !== "number") return;
-    const h = Math.max(200, Math.min(d.height, 40000));
-    const cur = parseFloat(frameEl.style.height) || 0;
-    if (Math.abs(cur - h) > 8) frameEl.style.height = h + "px";
-  });
 
   // ---- UI injection ----------------------------------------------------------
 
@@ -443,6 +375,16 @@
     return ret;
   };
   window.addEventListener("popstate", handleUrlChange);
+
+  // The inline preview auto-sizes to its content: the sandbox reports its height
+  // (on load/resize/ResizeObserver) and we grow the iframe so the whole page
+  // shows and the GitHub page itself scrolls — no nested scrollbar.
+  window.addEventListener("message", (e) => {
+    if (!frameEl || e.source !== frameEl.contentWindow) return;
+    if (e.data?.type === "ghhp-height" && typeof e.data.height === "number") {
+      frameEl.style.height = Math.max(200, Math.ceil(e.data.height)) + "px";
+    }
+  });
 
   // Safety net: cheap re-check ~ once per second (re-adds buttons if React
   // removed them, and catches soft navigations the history hook didn't see).

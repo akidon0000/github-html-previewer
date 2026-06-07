@@ -3,6 +3,9 @@
 // it by rewriting this document with document.write — which executes the page's
 // inline and external scripts (e.g. Mermaid), unlike innerHTML/srcdoc-in-a-
 // strict-CSP-page. The page's own scripts run under this page's permissive CSP.
+//
+// We also inject a tiny height reporter so the embedder (inline mode) can grow
+// the iframe to fit the content instead of using a fixed height.
 
 function injectBase(html, base) {
   if (!base) return html;
@@ -18,26 +21,28 @@ function stripScripts(html) {
     .replace(/<script\b[^>]*\/?>/gi, "");
 }
 
-// Appended to the rendered document so the page reports its content height back
-// to the embedder (used by inline mode to size the iframe to fit the content,
-// updating as images / Mermaid / etc. change the layout). Harmless when the
-// embedder ignores it (e.g. the other-tab controller).
+// Posts the rendered content's height to the parent on load / resize / async
+// growth (images, Mermaid, etc.), so the embedder can size the iframe.
 const HEIGHT_REPORTER =
   "<script>(function(){" +
-  "function r(){try{var h=Math.max(" +
-  "document.documentElement?document.documentElement.scrollHeight:0," +
-  "document.body?document.body.scrollHeight:0);" +
-  'parent.postMessage({type:"ghhp-height",height:h},"*");}catch(e){}}' +
-  'window.addEventListener("load",r);window.addEventListener("resize",r);' +
-  "try{new ResizeObserver(r).observe(document.documentElement);}catch(e){}" +
-  "setTimeout(r,0);setTimeout(r,500);setTimeout(r,1500);" +
+  "function H(){var d=document,b=d.body,e=d.documentElement;" +
+  "return Math.max(e?e.scrollHeight:0,b?b.scrollHeight:0,e?e.offsetHeight:0,b?b.offsetHeight:0);}" +
+  'function S(){try{parent.postMessage({type:"ghhp-height",height:H()},"*");}catch(_){}}' +
+  'window.addEventListener("load",S);window.addEventListener("resize",S);' +
+  "try{new ResizeObserver(S).observe(document.documentElement);}catch(_){}" +
+  "[50,150,300,600,1000,2000,3500].forEach(function(d){setTimeout(S,d);});S();" +
   "})();<\/script>";
+
+function withHeightReporter(html) {
+  if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, HEIGHT_REPORTER + "</body>");
+  return html + HEIGHT_REPORTER;
+}
 
 window.addEventListener("message", (event) => {
   const data = event.data;
   if (data?.type !== "ghhp-render") return;
   const body = data.allowScripts ? data.html : stripScripts(data.html);
   document.open();
-  document.write(injectBase(body, data.rawBase) + HEIGHT_REPORTER);
+  document.write(withHeightReporter(injectBase(body, data.rawBase)));
   document.close();
 });
