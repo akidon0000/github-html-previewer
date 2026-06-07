@@ -1,21 +1,18 @@
 // Injected on github.com. On a blob view of an .html / .htm file we add a
-// "Preview" tab next to GitHub's "Code" / "Blame" toggle. Activating it renders
-// the file as a sandboxed iframe *in place of the code listing*; toggling it off
-// (or clicking GitHub's Code/Blame) restores the original view.
+// "Preview" segment next to GitHub's "Code" / "Blame" toggle. Activating it
+// renders the file *in place of the code listing*, inside an embedded extension
+// page (which lives outside github.com's CSP, so the HTML actually renders).
+// Toggling it off — or clicking GitHub's Code/Blame — restores the code view.
 //
-// GitHub's blob page is a React app whose markup and (obfuscated) class names
-// change often, so nothing here hard-codes a brittle class. We anchor off the
-// "Blame" link, fall back through several selectors to find the code region, and
-// if we can't find the toggle at all we drop a floating button instead so the
-// feature still works.
+// GitHub's blob page is a React app with obfuscated, frequently-changing class
+// names, so we anchor everything off the "Blame" control and clone its segment
+// to inherit styling. If the toggle can't be found we fall back to a floating
+// button so the feature still works.
 
 (function () {
   const TAB_ID = "ghhp-preview-tab";
   const FRAME_ID = "ghhp-preview-frame";
   const FLOAT_ID = "ghhp-float-btn";
-
-  /** rawUrl -> fetched HTML text */
-  const cache = new Map();
 
   let previewActive = false;
   let hiddenRegion = null; // the code element we hid
@@ -37,14 +34,6 @@
       rawUrl: `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}`,
       rawBase: `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${dir ? dir + "/" : ""}`
     };
-  }
-
-  function injectBase(html, base) {
-    if (!base) return html;
-    const tag = `<base href="${base}">`;
-    if (/<head[^>]*>/i.test(html)) return html.replace(/<head[^>]*>/i, (m) => m + tag);
-    if (/<html[^>]*>/i.test(html)) return html.replace(/<html[^>]*>/i, (m) => m + tag);
-    return tag + html;
   }
 
   function sendMessage(msg) {
@@ -82,21 +71,63 @@
     return null;
   }
 
-  // The "Blame" link is the most stable anchor for the Code/Blame toggle.
-  function findBlameLink() {
-    return document.querySelector('a[href*="/blame/"]');
+  // Locate the Code/Blame toggle by anchoring on the "Blame" control. Returns
+  // the container (segmented control), the Blame *segment item*, and the Blame
+  // element itself.
+  function findToggle() {
+    let blame = document.querySelector('a[href*="/blame/"]');
+    if (!blame) {
+      const candidates = document.querySelectorAll(
+        '[class*="SegmentedControl"] a, [class*="SegmentedControl"] button, nav a, nav button'
+      );
+      for (const el of candidates) {
+        if (el.textContent.trim() === "Blame") {
+          blame = el;
+          break;
+        }
+      }
+    }
+    if (!blame) return null;
+
+    const container =
+      blame.closest("ul") ||
+      blame.closest('[class*="SegmentedControl"]') ||
+      (blame.parentElement && blame.parentElement.parentElement) ||
+      blame.parentElement;
+    if (!container) return null;
+
+    // Walk up to the direct child of the container that contains Blame.
+    let item = blame;
+    while (item.parentElement && item.parentElement !== container) {
+      item = item.parentElement;
+    }
+    return { container, item };
   }
 
-  function setLabel(el, text) {
-    const labelEl = el.querySelector('[data-component="text"]') || el;
-    labelEl.textContent = text;
+  function setSegmentLabel(node, text) {
+    // Primer mirrors the label in data-text (used for the bold-when-active trick).
+    const plain = text.replace(/^[^\w]+\s*/, "");
+    node.querySelectorAll("[data-text]").forEach((e) => e.setAttribute("data-text", plain));
+    // Replace the visible text in the deepest text-bearing leaf.
+    const leaves = node.querySelectorAll('[data-component="text"], [class*="Text"], span');
+    for (const leaf of leaves) {
+      if (leaf.children.length === 0 && leaf.textContent.trim()) {
+        leaf.textContent = text;
+        return;
+      }
+    }
+    node.textContent = text;
   }
 
-  function markActive(tab, active) {
-    if (!tab) return;
-    tab.setAttribute("aria-pressed", String(active));
-    tab.style.fontWeight = active ? "600" : "";
-    tab.style.boxShadow = active ? "inset 0 -2px 0 0 #fd8c73" : "";
+  function clickableOf(node) {
+    return node.querySelector("a, button") || node;
+  }
+
+  function markActive(node, active) {
+    if (!node) return;
+    const btn = clickableOf(node);
+    if (active) btn.setAttribute("aria-current", "true");
+    else btn.removeAttribute("aria-current");
   }
 
   // ---- preview lifecycle -----------------------------------------------------
@@ -108,22 +139,19 @@
       return;
     }
 
-    let html = cache.get(info.rawUrl);
-    if (html == null) {
-      setLabel(tab, "⏳ …");
-      const resp = await sendMessage({ type: "FETCH_RAW", rawUrl: info.rawUrl });
-      setLabel(tab, "🔍 Preview");
-      if (!resp?.ok) {
-        alert("取得に失敗しました: " + (resp?.error || "unknown error"));
-        return;
-      }
-      html = resp.html;
-      cache.set(info.rawUrl, html);
+    setSegmentLabel(tab, "⏳ …");
+    const resp = await sendMessage({ type: "FETCH_RAW", rawUrl: info.rawUrl, rawBase: info.rawBase });
+    setSegmentLabel(tab, "🔍 Preview");
+    if (!resp?.ok) {
+      alert("HTML の取得に失敗しました: " + (resp?.error || "unknown error"));
+      return;
     }
 
     frameEl = document.createElement("iframe");
     frameEl.id = FRAME_ID;
-    frameEl.setAttribute("sandbox", "allow-scripts allow-forms allow-popups allow-modals");
+    // Embed the extension page (outside github.com's CSP) which renders the HTML.
+    frameEl.src =
+      chrome.runtime.getURL("src/preview-frame.html") + "#" + encodeURIComponent(resp.key);
     Object.assign(frameEl.style, {
       width: "100%",
       height: "80vh",
@@ -131,7 +159,6 @@
       borderRadius: "6px",
       background: "#fff"
     });
-    frameEl.srcdoc = injectBase(html, info.rawBase);
 
     hiddenRegion = region;
     region.style.display = "none";
@@ -159,48 +186,48 @@
 
   function insertPreviewTab(info) {
     if (document.getElementById(TAB_ID)) return true;
-    const blame = findBlameLink();
-    if (!blame || !blame.parentElement) return false;
+    const toggle = findToggle();
+    if (!toggle) return false;
 
-    const tab = blame.cloneNode(true); // inherit GitHub's segment styling
+    const tab = toggle.item.cloneNode(true); // inherit GitHub's segment styling
     tab.id = TAB_ID;
-    tab.removeAttribute("href");
-    tab.setAttribute("role", "button");
-    tab.setAttribute("tabindex", "0");
-    tab.setAttribute("aria-pressed", "false");
-    tab.style.cursor = "pointer";
-    setLabel(tab, "🔍 Preview");
+    tab.querySelectorAll("[aria-current]").forEach((e) => e.removeAttribute("aria-current"));
+    tab.querySelectorAll("a[href]").forEach((a) => a.removeAttribute("href"));
+    tab.querySelectorAll("a").forEach((a) => {
+      a.setAttribute("role", "button");
+      a.setAttribute("tabindex", "0");
+    });
+    setSegmentLabel(tab, "🔍 Preview");
 
-    tab.addEventListener("click", (e) => {
+    const clickable = clickableOf(tab);
+    clickable.style.cursor = "pointer";
+    const activate = (e) => {
       e.preventDefault();
       togglePreview(info, tab);
-    });
-    tab.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        togglePreview(info, tab);
-      }
+    };
+    clickable.addEventListener("click", activate);
+    clickable.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") activate(e);
     });
 
     // Clicking GitHub's own Code/Blame should drop back to the normal view.
-    for (const sibling of blame.parentElement.children) {
-      sibling.addEventListener("click", () => {
+    for (const sib of toggle.container.children) {
+      sib.addEventListener("click", () => {
         if (previewActive) deactivatePreview(tab);
       });
     }
 
-    blame.parentElement.appendChild(tab);
+    toggle.container.appendChild(tab);
     return true;
   }
 
-  // Fallback when the Code/Blame toggle can't be located: a floating button that
-  // toggles the inline preview the same way.
+  // Fallback when the Code/Blame toggle can't be located.
   function insertFloatingButton(info) {
     if (document.getElementById(FLOAT_ID)) return;
     const btn = document.createElement("button");
     btn.id = FLOAT_ID;
     btn.type = "button";
-    setLabel(btn, "🔍 Preview");
+    btn.textContent = "🔍 Preview";
     Object.assign(btn.style, {
       position: "fixed",
       right: "20px",
@@ -231,6 +258,12 @@
     if (!info) {
       teardown();
       return;
+    }
+    // If React wiped our frame out from under us, reset state so the toggle works.
+    if (previewActive && !document.getElementById(FRAME_ID)) {
+      previewActive = false;
+      hiddenRegion = null;
+      frameEl = null;
     }
     if (!insertPreviewTab(info)) insertFloatingButton(info);
   }
@@ -265,7 +298,6 @@
   }
   setInterval(handleNav, 800);
 
-  // GitHub re-renders the toolbar asynchronously; re-insert if it gets wiped.
   new MutationObserver(schedule).observe(document.body, {
     childList: true,
     subtree: true

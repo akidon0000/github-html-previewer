@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GitHub HTML Previewer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Render HTML files hosted on GitHub locally, instead of reading the raw source.",
   "permissions": ["storage", "tabs"],
   "host_permissions": [
@@ -21,6 +21,12 @@
       "matches": ["https://github.com/*"],
       "js": ["src/content.js"],
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/preview-frame.html"],
+      "matches": ["https://github.com/*"]
     }
   ]
 }
