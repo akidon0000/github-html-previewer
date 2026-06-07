@@ -1,8 +1,8 @@
 // Runs inside the sandboxed extension page (permissive CSP: inline / eval /
-// external https scripts allowed). It receives the HTML from the controller and
-// renders it into a nested iframe. That nested iframe inherits this page's
-// permissive CSP, so the previewed page's scripts run — while staying isolated
-// from the controller. The scripts toggle just adds/removes "allow-scripts".
+// external https scripts allowed). The controller posts the HTML here; we render
+// it by rewriting this document with document.write — which executes the page's
+// inline and external scripts (e.g. Mermaid), unlike innerHTML/srcdoc-in-a-
+// strict-CSP-page. The page's own scripts run under this page's permissive CSP.
 
 function injectBase(html, base) {
   if (!base) return html;
@@ -12,17 +12,32 @@ function injectBase(html, base) {
   return tag + html;
 }
 
-const content = document.getElementById("content");
+function stripScripts(html) {
+  return html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, "")
+    .replace(/<script\b[^>]*\/?>/gi, "");
+}
+
+// Appended to the rendered document so the page reports its content height back
+// to the embedder (used by inline mode to size the iframe to fit the content,
+// updating as images / Mermaid / etc. change the layout). Harmless when the
+// embedder ignores it (e.g. the other-tab controller).
+const HEIGHT_REPORTER =
+  "<script>(function(){" +
+  "function r(){try{var h=Math.max(" +
+  "document.documentElement?document.documentElement.scrollHeight:0," +
+  "document.body?document.body.scrollHeight:0);" +
+  'parent.postMessage({type:"ghhp-height",height:h},"*");}catch(e){}}' +
+  'window.addEventListener("load",r);window.addEventListener("resize",r);' +
+  "try{new ResizeObserver(r).observe(document.documentElement);}catch(e){}" +
+  "setTimeout(r,0);setTimeout(r,500);setTimeout(r,1500);" +
+  "})();<\/script>";
 
 window.addEventListener("message", (event) => {
   const data = event.data;
   if (data?.type !== "ghhp-render") return;
-
-  const flags = ["allow-forms", "allow-popups", "allow-modals", "allow-popups-to-escape-sandbox"];
-  if (data.allowScripts) flags.unshift("allow-scripts");
-  content.setAttribute("sandbox", flags.join(" "));
-  content.srcdoc = injectBase(data.html, data.rawBase);
+  const body = data.allowScripts ? data.html : stripScripts(data.html);
+  document.open();
+  document.write(injectBase(body, data.rawBase) + HEIGHT_REPORTER);
+  document.close();
 });
-
-// Tell the controller we're ready to receive the payload.
-window.parent.postMessage({ type: "ghhp-sandbox-ready" }, "*");

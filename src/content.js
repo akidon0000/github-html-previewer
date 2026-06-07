@@ -22,13 +22,15 @@
   let inlineActive = false;
   let hiddenRegion = null;
   let frameEl = null;
+  let prevActive = null; // { el, value } native segment we deselected for inline
 
   // ---- helpers ---------------------------------------------------------------
 
   function htmlBlobInfo() {
-    // ["", OWNER, REPO, "blob", BRANCH, ...path]
+    // ["", OWNER, REPO, ("blob"|"blame"), BRANCH, ...path]
+    // Match the Blame view too, so our buttons stay visible there.
     const parts = location.pathname.split("/");
-    if (parts[3] !== "blob" || parts.length < 6) return null;
+    if ((parts[3] !== "blob" && parts[3] !== "blame") || parts.length < 6) return null;
     const file = parts[parts.length - 1];
     if (!/\.html?$/i.test(file)) return null;
 
@@ -46,10 +48,15 @@
 
   function sendMessage(msg) {
     return new Promise((resolve) => {
-      chrome.runtime.sendMessage(msg, (resp) => {
-        if (chrome.runtime.lastError) resolve({ ok: false, error: chrome.runtime.lastError.message });
-        else resolve(resp);
-      });
+      try {
+        chrome.runtime.sendMessage(msg, (resp) => {
+          if (chrome.runtime.lastError) resolve({ ok: false, error: chrome.runtime.lastError.message });
+          else resolve(resp);
+        });
+      } catch (e) {
+        // e.g. "Extension context invalidated" after the extension reloads.
+        resolve({ ok: false, error: String(e) });
+      }
     });
   }
 
@@ -82,27 +89,49 @@
     return null;
   }
 
+  // The link in the toggle that points to a given pathname (used to anchor on the
+  // Code/Blame control reliably on both the blob and blame views).
+  function anchorToPath(pathname) {
+    for (const a of document.querySelectorAll("a[href]")) {
+      try {
+        if (new URL(a.getAttribute("href"), location.origin).pathname === pathname) return a;
+      } catch (_e) {
+        /* ignore malformed href */
+      }
+    }
+    return null;
+  }
+
   function findToggle() {
-    let blame = document.querySelector('a[href*="/blame/"]');
-    if (!blame) {
+    // The Code/Blame control always links to the *other* view of this file
+    // (Blame link on a blob page, Code link on a blame page). That link is a
+    // unique, reliable anchor — unlike breadcrumb links which point elsewhere.
+    const isBlame = location.pathname.split("/")[3] === "blame";
+    const otherPath = isBlame
+      ? location.pathname.replace("/blame/", "/blob/")
+      : location.pathname.replace("/blob/", "/blame/");
+
+    let anchor = anchorToPath(otherPath);
+    if (!anchor) {
       const candidates = document.querySelectorAll(
         '[class*="SegmentedControl"] a, [class*="SegmentedControl"] button, nav a, nav button'
       );
       for (const el of candidates) {
-        if (el.textContent.trim() === "Blame") {
-          blame = el;
+        const t = el.textContent.trim();
+        if (t === "Blame" || t === "Code") {
+          anchor = el;
           break;
         }
       }
     }
-    if (!blame) return null;
+    if (!anchor) return null;
     const container =
-      blame.closest("ul") ||
-      blame.closest('[class*="SegmentedControl"]') ||
-      (blame.parentElement && blame.parentElement.parentElement) ||
-      blame.parentElement;
+      anchor.closest("ul") ||
+      anchor.closest('[class*="SegmentedControl"]') ||
+      (anchor.parentElement && anchor.parentElement.parentElement) ||
+      anchor.parentElement;
     if (!container) return null;
-    let item = blame;
+    let item = anchor;
     while (item.parentElement && item.parentElement !== container) item = item.parentElement;
     return { container, item };
   }
@@ -130,57 +159,109 @@
     else btn.removeAttribute("aria-current");
   }
 
+  // Move the segmented-control selection onto our Preview segment: deselect the
+  // currently-active native segment (Code/Blame) and remember it so we can
+  // restore it when the preview is closed.
+  function selectPreviewSegment(btn) {
+    prevActive = null;
+    const container = btn.parentElement;
+    if (container) {
+      for (const seg of container.children) {
+        if (seg === btn) continue;
+        const c = clickableOf(seg);
+        const cur = c.getAttribute("aria-current");
+        if (cur) {
+          prevActive = { el: c, value: cur };
+          c.removeAttribute("aria-current");
+        }
+      }
+    }
+    markActive(btn, true);
+  }
+
+  function restoreSelection() {
+    if (prevActive) {
+      prevActive.el.setAttribute("aria-current", prevActive.value);
+      prevActive = null;
+    }
+  }
+
   // ---- preview actions -------------------------------------------------------
 
-  async function storeHtml(info, openTab) {
-    const html = readDomSource(); // null -> background fetches the public raw file
-    return sendMessage({
-      type: "OPEN_PREVIEW",
-      html,
-      rawUrl: info.rawUrl,
-      rawBase: info.rawBase,
-      sourceUrl: location.href,
-      openTab
-    });
+  // Get the file's HTML: straight from the page DOM (works for private repos),
+  // else via the service worker fetching the public raw file.
+  async function getHtml(info) {
+    const dom = readDomSource();
+    if (dom != null) return { ok: true, html: dom };
+    return sendMessage({ type: "FETCH_RAW", rawUrl: info.rawUrl });
   }
 
   async function openOtherTab(info, btn) {
-    setSegmentLabel(btn, "⏳ …");
-    const resp = await storeHtml(info, true);
-    setSegmentLabel(btn, "Preview(other tab)");
-    if (!resp?.ok) alert("HTML の取得に失敗しました: " + (resp?.error || "unknown error"));
+    try {
+      const html = readDomSource(); // null -> background fetches the public raw file
+      setSegmentLabel(btn, "⏳ …");
+      const resp = await sendMessage({
+        type: "OPEN_PREVIEW",
+        html,
+        rawUrl: info.rawUrl,
+        rawBase: info.rawBase,
+        sourceUrl: location.href
+      });
+      setSegmentLabel(btn, "Preview(other tab)");
+      if (!resp?.ok) alert("HTML の取得に失敗しました: " + (resp?.error || "unknown error"));
+    } catch (e) {
+      setSegmentLabel(btn, "Preview(other tab)");
+      alert("プレビューに失敗しました: " + String(e));
+    }
   }
 
   async function activateInline(info, btn) {
-    const region = findCodeRegion();
-    if (!region) {
-      alert("プレビューを表示する領域が見つかりませんでした（GitHub の DOM 変更の可能性があります）。");
-      return;
-    }
-    setSegmentLabel(btn, "⏳ …");
-    const resp = await storeHtml(info, false);
-    setSegmentLabel(btn, "Preview(inline)");
-    if (!resp?.ok) {
-      alert("HTML の取得に失敗しました: " + (resp?.error || "unknown error"));
-      return;
-    }
+    try {
+      const region = findCodeRegion();
+      if (!region) {
+        alert("プレビューを表示する領域が見つかりませんでした（GitHub の DOM 変更の可能性があります）。");
+        return;
+      }
+      setSegmentLabel(btn, "⏳ …");
+      const got = await getHtml(info);
+      setSegmentLabel(btn, "Preview(inline)");
+      if (!got.ok) {
+        alert("HTML の取得に失敗しました: " + (got.error || "unknown error"));
+        return;
+      }
 
-    frameEl = document.createElement("iframe");
-    frameEl.id = FRAME_ID;
-    // Web-accessible extension controller -> outside github.com's CSP.
-    frameEl.src = chrome.runtime.getURL("src/preview.html");
-    Object.assign(frameEl.style, {
-      width: "100%",
-      height: "80vh",
-      border: "1px solid #30363d",
-      borderRadius: "6px",
-      background: "#fff"
-    });
-    hiddenRegion = region;
-    region.style.display = "none";
-    region.parentElement.insertBefore(frameEl, region.nextSibling);
-    inlineActive = true;
-    markActive(btn, true);
+      // Embed the sandboxed renderer directly (one level), and hand it the HTML
+      // via postMessage once it has loaded. The sandbox page is a web-accessible
+      // resource with a permissive CSP, so it renders (and runs scripts) freely.
+      frameEl = document.createElement("iframe");
+      frameEl.id = FRAME_ID;
+      frameEl.src = chrome.runtime.getURL("src/preview-sandbox.html");
+      // Height is auto-fit to the content (see the ghhp-height handler), so the
+      // inner scrollbar is redundant — the GitHub page scrolls the whole preview.
+      frameEl.setAttribute("scrolling", "no");
+      Object.assign(frameEl.style, {
+        width: "100%",
+        height: "80vh",
+        border: "1px solid #30363d",
+        borderRadius: "6px",
+        background: "#fff",
+        overflow: "hidden"
+      });
+      frameEl.addEventListener("load", () => {
+        frameEl.contentWindow.postMessage(
+          { type: "ghhp-render", html: got.html, rawBase: info.rawBase, allowScripts: true },
+          "*"
+        );
+      });
+      hiddenRegion = region;
+      region.style.display = "none";
+      region.parentElement.insertBefore(frameEl, region.nextSibling);
+      inlineActive = true;
+      selectPreviewSegment(btn);
+    } catch (e) {
+      setSegmentLabel(btn, "Preview(inline)");
+      alert("プレビューに失敗しました: " + String(e));
+    }
   }
 
   function deactivateInline(btn) {
@@ -190,12 +271,25 @@
     hiddenRegion = null;
     inlineActive = false;
     markActive(btn || document.getElementById(INLINE_ID), false);
+    restoreSelection();
   }
 
   function toggleInline(info, btn) {
     if (inlineActive) deactivateInline(btn);
     else activateInline(info, btn);
   }
+
+  // The inline sandbox reports its content height; size the iframe to fit so the
+  // GitHub page scrolls the whole preview naturally (no inner scrollbar). Updates
+  // as images / Mermaid change the layout.
+  window.addEventListener("message", (e) => {
+    if (!frameEl || e.source !== frameEl.contentWindow) return;
+    const d = e.data;
+    if (d?.type !== "ghhp-height" || typeof d.height !== "number") return;
+    const h = Math.max(200, Math.min(d.height, 40000));
+    const cur = parseFloat(frameEl.style.height) || 0;
+    if (Math.abs(cur - h) > 8) frameEl.style.height = h + "px";
+  });
 
   // ---- UI injection ----------------------------------------------------------
 
@@ -300,50 +394,62 @@
       hiddenRegion = null;
       frameEl = null;
     }
-    if (!insertSegments(info)) insertFloating(info);
-  }
-
-  // ---- react to GitHub's SPA navigation & async rendering --------------------
-
-  function safeEnsureUI() {
-    // GitHub re-renders the blob view constantly; swallow transient DOM errors
-    // so they don't pile up in the extension's error log.
-    try {
-      ensureUI();
-    } catch (_e) {
-      /* ignore */
+    if (insertSegments(info)) {
+      document.getElementById(FLOAT_ID)?.remove(); // drop the fallback if it was shown
+    } else {
+      insertFloating(info);
     }
   }
 
-  let scheduled = false;
-  function schedule() {
-    if (scheduled) return;
-    scheduled = true;
-    requestAnimationFrame(() => {
-      scheduled = false;
-      safeEnsureUI();
-    });
+  // ---- react to GitHub's SPA navigation & async rendering --------------------
+  //
+  // We deliberately do NOT use a document-wide MutationObserver: GitHub re-renders
+  // the blob view constantly, and observing the whole subtree made the page crawl.
+  // Instead we run a short burst of checks after load/navigation (to catch the
+  // toolbar rendering in), plus a cheap low-frequency interval as a safety net
+  // (re-adds our buttons if React removed them, and catches missed navigations).
+
+  function safeEnsureUI() {
+    try {
+      ensureUI();
+    } catch (_e) {
+      /* ignore transient DOM errors during GitHub's re-renders */
+    }
   }
+
+  function ensureSoon() {
+    [0, 200, 500, 1000, 1800].forEach((d) => setTimeout(safeEnsureUI, d));
+  }
+
+  // On navigation, drop the old buttons (they captured the previous file's info)
+  // and re-inject for the new page.
+  function handleUrlChange() {
+    if (location.href === lastUrl) return;
+    lastUrl = location.href;
+    try {
+      teardown();
+    } catch (_e) {
+      /* ignore */
+    }
+    ensureSoon();
+  }
+
+  let lastUrl = location.href;
 
   const origPush = history.pushState;
   history.pushState = function (...args) {
     const ret = origPush.apply(this, args);
-    handleNav();
+    handleUrlChange();
     return ret;
   };
-  window.addEventListener("popstate", handleNav);
+  window.addEventListener("popstate", handleUrlChange);
 
-  let lastUrl = location.href;
-  function handleNav() {
-    if (location.href !== lastUrl) {
-      lastUrl = location.href;
-      teardown();
-    }
-    schedule();
-  }
-  setInterval(handleNav, 800);
+  // Safety net: cheap re-check ~ once per second (re-adds buttons if React
+  // removed them, and catches soft navigations the history hook didn't see).
+  setInterval(() => {
+    handleUrlChange();
+    safeEnsureUI();
+  }, 1000);
 
-  new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
-
-  safeEnsureUI();
+  ensureSoon();
 })();
